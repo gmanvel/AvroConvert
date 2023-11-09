@@ -27,6 +27,6 @@ namespace SolTechnology.Avro.AvroObjectServices.Write.Resolvers
     internal class WriteStep
     {
         internal Encoder.WriteItem WriteField { get; set; }
-        internal string FiledName { get; set; }
+        internal string FieldName { get; set; }
     }
 }

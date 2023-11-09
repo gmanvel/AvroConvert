@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
 using AutoFixture;
 using GrandeBenchmark;
@@ -16,14 +15,12 @@ namespace Profiler
             Fixture fixture = new Fixture();
             var data = fixture
                 .Build<User>()
-                .With(u => u.Offerings,
-                fixture.CreateMany<Offering>(21).ToList)
-                .CreateMany(37).ToArray();
+                .With(u => u.Offerings, fixture.CreateMany<Offering>(50).ToList)
+                .CreateMany(1000).ToArray();
 
             var serialized = AvroConvert.Serialize(data);
-            var deserialized = AvroConvert.Deserialize<List<User>>(serialized);
 
-            Console.WriteLine("end World!");
+            Console.WriteLine($"Serialized {serialized.Length}");
             Console.ReadLine();
         }
     }

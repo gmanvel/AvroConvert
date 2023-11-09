@@ -26,13 +26,15 @@ using System.Threading;
 using SolTechnology.Avro.Features.Serialize;
 using SolTechnology.Avro.AvroObjectServices.Schemas;
 using SolTechnology.Avro.AvroObjectServices.Write.Resolvers;
+using static SolTechnology.Avro.Features.Serialize.Encoder;
+using static SolTechnology.Avro.AvroObjectServices.Write.WriteResolver;
 
 // ReSharper disable once CheckNamespace
 namespace SolTechnology.Avro.AvroObjectServices.Write
 {
     internal partial class WriteResolver
     {
-        private static readonly ConcurrentDictionary<int, Lazy<Func<object, string, object>>> gettersDictionary = new ConcurrentDictionary<int, Lazy<Func<object, string, object>>>();
+        private static readonly ConcurrentDictionary<Type, Lazy<Action<object, IWriter>>> writersDictionary = new();
 
         internal Encoder.WriteItem ResolveRecord(RecordSchema recordSchema)
         {
@@ -44,20 +46,20 @@ namespace SolTechnology.Avro.AvroObjectServices.Write
                 var record = new WriteStep
                 {
                     WriteField = ResolveWriter(field.TypeSchema),
-                    FiledName = field.Aliases.FirstOrDefault() ?? field.Name,
+                    FieldName = field.Aliases.FirstOrDefault() ?? field.Name,
                 };
                 writeSteps[index++] = record;
             }
+            
+            return RecordResolver;
 
             void RecordResolver(object v, IWriter e)
             {
                 WriteRecordFields(v, writeSteps, e);
             }
-
-            return RecordResolver;
         }
 
-        private void WriteRecordFields(object recordObj, WriteStep[] writers, IWriter encoder)
+        private static void WriteRecordFields(object recordObj, WriteStep[] writers, IWriter encoder)
         {
             if (recordObj is null)
             {
@@ -72,22 +74,24 @@ namespace SolTechnology.Avro.AvroObjectServices.Write
             }
 
             var type = recordObj.GetType();
-            var typeHash = type.GetHashCode();
 
-            var lazyGetters = gettersDictionary.GetOrAdd(typeHash, new Lazy<Func<object, string, object>>(() => GenerateGetValue(type), LazyThreadSafetyMode.ExecutionAndPublication));
-            Func<object, string, object> getters = lazyGetters.Value;
+#if NET6_0_OR_GREATER
+            var lazyWriters = writersDictionary.GetOrAdd(type, Factory, writers);
+#else
+            var lazyWriters = writersDictionary.GetOrAdd(type, t => new Lazy<Action<object, IWriter>>(() => GetRecordWriter(t, writers)));
+#endif
+            Action<object, IWriter> recordWriter = lazyWriters.Value;
 
-            foreach (var writer in writers)
-            {
-                var value = getters.Invoke(recordObj, writer.FiledName);
-                if (value == null)
-                {
-                    value = type.GetField(writer.FiledName)?.GetValue(recordObj);
-                }
-
-                writer.WriteField(value, encoder);
-            }
+            recordWriter.Invoke(recordObj, encoder);
         }
+
+        private static Func<Type, WriteStep[], Lazy<Action<object, IWriter>>> Factory =>
+            (type, writeSteps) => new Lazy<Action<object, IWriter>>(() => GetRecordWriter(type, writeSteps),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+
+        private static Func<Type, Lazy<Action<object, IWriter>>> Factory2 =>
+            (type) => new Lazy<Action<object, IWriter>>(() => GetRecordWriter(type, Array.Empty<WriteStep>()),
+                LazyThreadSafetyMode.ExecutionAndPublication);
 
         private static void HandleExpando(WriteStep[] writers, IWriter encoder, ExpandoObject expando)
         {
@@ -95,32 +99,75 @@ namespace SolTechnology.Avro.AvroObjectServices.Write
 
             foreach (var writer in writers)
             {
-                expandoDictionary.TryGetValue(writer.FiledName, out var value);
+                expandoDictionary.TryGetValue(writer.FieldName, out var value);
                 writer.WriteField(value, encoder);
             }
         }
 
-        private static Func<object, string, object> GenerateGetValue(Type type)
+        private static Action<object, IWriter> GetRecordWriter(Type type, WriteStep[] writeSteps)
         {
-            var instance = Expression.Parameter(typeof(object), "instance");
-            var memberName = Expression.Parameter(typeof(string), "memberName");
-            var nameHash = Expression.Variable(typeof(int), "nameHash");
-            var calHash = Expression.Assign(nameHash,
-                Expression.Call(memberName, typeof(object).GetMethod("GetHashCode")));
-            var cases = new List<SwitchCase>();
-            foreach (var propertyInfo in type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase | BindingFlags.FlattenHierarchy))
-            {
-                var property = Expression.Property(Expression.Convert(instance, type), propertyInfo.Name);
-                var propertyHash = Expression.Constant(propertyInfo.Name.GetHashCode(), typeof(int));
+            var namePropertyInfoMap =
+                type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase |
+                                   BindingFlags.FlattenHierarchy)
+                    .ToDictionary(pi => pi.Name, pi => pi);
 
-                cases.Add(Expression.SwitchCase(Expression.Convert(property, typeof(object)), propertyHash));
+            var instance = Expression.Parameter(typeof(object), "instance");
+            var writer = Expression.Parameter(typeof(IWriter), "writer");
+
+            var actualInstance = Expression.Variable(type, "actualInstance");
+
+            var expressions = new List<Expression>
+            {
+                Expression.Assign(actualInstance, Expression.Convert(instance, type))
+            };
+
+            for (var index = 0; index < writeSteps.Length; index++)
+            {
+                var writeStep = writeSteps[index];
+
+                if (namePropertyInfoMap.TryGetValue(writeStep.FieldName, out var propInfo))
+                {
+                    var propertyAccess = Expression.Property(actualInstance, propInfo);
+                    if (propInfo.PropertyType.IsValueType)
+                    {
+                        var methodCallExpression = GetMethodCall(propInfo.PropertyType, writer, propertyAccess);
+                        expressions.Add(methodCallExpression);
+                    }
+                    else
+                    {
+                        // Convert the property value to object, as WriteItem expects an object as the first parameter.
+                        var convertedPropertyAccess = Expression.Convert(propertyAccess, typeof(object));
+
+                        // Create the delegate invocation expression.
+                        var writeFieldDelegate = Expression.Constant(writeStep.WriteField, typeof(WriteItem));
+                        var delegateInvokeExpression = Expression.Invoke(writeFieldDelegate, convertedPropertyAccess, writer);
+
+                        expressions.Add(delegateInvokeExpression);
+                    }
+                }
             }
 
-            var switchEx = Expression.Switch(nameHash, Expression.Constant(null), cases.ToArray());
-            var methodBody = Expression.Block(typeof(object), new[] { nameHash }, calHash, switchEx);
+            var block = Expression.Block(new[] { actualInstance }, expressions);
+            return Expression.Lambda<Action<object, IWriter>>(block, instance, writer).Compile();
 
-            return Expression.Lambda<Func<object, string, object>>(methodBody, instance, memberName).Compile();
+            static MethodCallExpression GetMethodCall(Type primitiveType, ParameterExpression writer, Expression propertyAccess)
+            {
+                if (primitiveType == typeof(int))
+                    return Expression.Call(writer, nameof(IWriter.WriteInt), Type.EmptyTypes, propertyAccess);
+                if (primitiveType == typeof(Guid))
+                    return Expression.Call(writer, nameof(IWriter.WriteGuid), Type.EmptyTypes, propertyAccess);
+                if (primitiveType == typeof(bool))
+                    return Expression.Call(writer, nameof(IWriter.WriteBoolean), Type.EmptyTypes, propertyAccess);
+                if (primitiveType == typeof(long))
+                    return Expression.Call(writer, nameof(IWriter.WriteLong), Type.EmptyTypes, propertyAccess);
+                if (primitiveType.IsEnum)
+                {
+                    var enumAsInt = Expression.Convert(propertyAccess, typeof(int));
+                    return Expression.Call(writer, nameof(IWriter.WriteInt), Type.EmptyTypes, enumAsInt);
+                }
 
+                throw new NotImplementedException();
+            }
         }
     }
 }

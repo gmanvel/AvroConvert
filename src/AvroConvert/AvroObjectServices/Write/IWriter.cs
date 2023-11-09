@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace SolTechnology.Avro.AvroObjectServices.Write
@@ -20,6 +21,12 @@ namespace SolTechnology.Avro.AvroObjectServices.Write
         /// </summary>
         /// <param name="datum"></param>
         void WriteInt(int value);
+
+        /// <summary>
+        /// Guid values are written as UTF8 encoded string bytes.
+        /// </summary>
+        /// <param name="value"></param>
+        void WriteGuid(Guid value);
 
         /// <summary>
         /// int and long values are written using variable-length, zig-zag coding.
