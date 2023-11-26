@@ -15,6 +15,7 @@
 */
 #endregion
 
+using System;
 using System.IO;
 using System.Linq;
 using SolTechnology.Avro.AvroObjectServices.FileHeader;
@@ -67,11 +68,19 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
 
         internal void ReadAndValidateSync(byte[] expectedSync)
         {
-            var syncBuffer = new byte[DataFileConstants.SyncSize];
+#if NET6_0_OR_GREATER
+            Span<byte> syncBuffer = stackalloc byte[DataFileConstants.SyncSize];
             ReadFixed(syncBuffer);
-
+            
+            if (!syncBuffer.SequenceEqual(new ReadOnlySpan<byte>(expectedSync)))
+                throw new AvroRuntimeException("Invalid sync!");
+#else
+            byte[] syncBuffer = new byte[DataFileConstants.SyncSize];
+            ReadFixed(syncBuffer);
+            
             if (!syncBuffer.SequenceEqual(expectedSync))
                 throw new AvroRuntimeException("Invalid sync!");
+#endif
         }
     }
 }
