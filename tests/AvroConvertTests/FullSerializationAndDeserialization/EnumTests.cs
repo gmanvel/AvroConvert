@@ -43,6 +43,20 @@ namespace AvroConvertComponentTests.FullSerializationAndDeserialization
             //Assert
             Assert.Equal(toSerialize, deserialized);
         }
+        
+        [Theory]
+        [MemberData(nameof(TestEngine.All), MemberType = typeof(TestEngine))]
+        public void Enum_with_flags_object(Func<object, Type, dynamic> engine)
+        {
+            foreach (var toSerialize in Enum.GetValues<TestEnumWithFlags>())
+            {
+                //Act
+                var deserialized = engine.Invoke(toSerialize, typeof(TestEnumWithFlags));
+
+                //Assert
+                Assert.Equal(toSerialize, deserialized);
+            }
+        }
 
         [Theory]
         [MemberData(nameof(TestEngine.All), MemberType = typeof(TestEngine))]
@@ -112,6 +126,25 @@ namespace AvroConvertComponentTests.FullSerializationAndDeserialization
             Assert.NotNull(deserialized);
             Assert.Equal(TestEnum.be, deserialized.EnumProp);
             Assert.Equal(TestEnum.ca, deserialized.SecondEnumProp);
+        }
+
+        [Theory]
+        [MemberData(nameof(TestEngine.All), MemberType = typeof(TestEngine))]
+        public void Class_with_enum_with_member_value_attributes(Func<object, Type, dynamic> engine)
+        {
+            //Arrange
+            ClassWithEnumDefiningMembers toSerialize = _fixture.Create<ClassWithEnumDefiningMembers>();
+            toSerialize.EnumProp = TestEnumWithMembers.Positive;
+            toSerialize.EnumPropWithStringDefault = null;
+
+            //Act
+            var deserialized = engine.Invoke(toSerialize, typeof(ClassWithEnumDefiningMembers));
+
+            //Assert
+            Assert.NotNull(deserialized);
+            Assert.Equal(TestEnumWithMembers.Positive, deserialized.EnumProp);
+            Assert.Equal(TestEnumWithMembers.Negative, deserialized.EnumPropWithDefault);
+            Assert.Equal(TestEnumWithMembers.Negative, deserialized.EnumPropWithStringDefault);
         }
     }
 }

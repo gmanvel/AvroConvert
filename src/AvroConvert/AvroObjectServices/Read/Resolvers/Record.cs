@@ -19,6 +19,7 @@ using System;
 using System.Collections.Generic;
 using System.Dynamic;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.Serialization;
 using FastMember;
 using SolTechnology.Avro.AvroObjectServices.Schemas;
@@ -30,7 +31,7 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
         private readonly Dictionary<int, Dictionary<string, ReadStep>> _readStepsDictionary = new();
         private readonly Dictionary<int, TypeAccessor> _accessorDictionary = new();
 
-        protected virtual object ResolveRecord(RecordSchema writerSchema, RecordSchema readerSchema, IReader dec,
+        protected virtual object ResolveRecord(RecordSchema writerSchema, RecordSchema readerSchema, IReader reader,
             Type type)
         {
             if (type != typeof(object))
@@ -44,6 +45,7 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
                 if (!_accessorDictionary.ContainsKey(typeHash))
                 {
                     accessor = TypeAccessor.Create(type, true);
+                    var members = accessor.GetMembers();
                     readSteps = new Dictionary<string, ReadStep>();
                     foreach (RecordFieldSchema wf in writerSchema.Fields)
                     {
@@ -51,20 +53,28 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
                         {
                             string name = rf.GetAliasOrDefault() ?? wf.Name;
 
-                            var members = accessor.GetMembers();
                             var memberInfo = members.FirstOrDefault(n => n.Name.Equals(name, StringComparison.InvariantCultureIgnoreCase));
                             if (memberInfo == null)
                             {
                                 continue;
                             }
 
-                            accessor[result, memberInfo.Name] = GetValue(wf, rf, memberInfo, dec);
-
-                            readSteps.Add(memberInfo.Name, new ReadStep(wf, rf, memberInfo));
-
+                            if (memberInfo.CanWrite)
+                            {
+                                accessor[result, memberInfo.Name] = GetValue(wf, rf, memberInfo, reader);
+                                readSteps.Add(memberInfo.Name, new ReadStep(wf, rf, memberInfo));
+                            }
+                            else
+                            {
+                                _skipper.Skip(wf.TypeSchema, reader);
+                                readSteps.Add(memberInfo.Name, new ReadStep(wf, rf, memberInfo, true));
+                            }
                         }
                         else
-                            _skipper.Skip(wf.TypeSchema, dec);
+                        {
+                            _skipper.Skip(wf.TypeSchema, reader);
+                            readSteps.Add(wf.Name, new ReadStep(wf, rf, null, true));
+                        }
                     }
 
                     _readStepsDictionary.Add(typeHash, readSteps);
@@ -78,12 +88,18 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
                     foreach (var readStep in readSteps)
                     {
                         var readStepValue = readStep.Value;
+                        if (readStepValue.ShouldSkip)
+                        {
+                            _skipper.Skip(readStepValue.WriteFieldSchema.TypeSchema, reader);
+                            break;
+                        }
+
                         accessor[result, readStep.Key] =
                             GetValue(
                                 readStepValue.WriteFieldSchema,
                                 readStepValue.ReadFieldSchema,
                                 readStepValue.MemberInfo,
-                                dec);
+                                reader);
                     }
                 }
 
@@ -104,17 +120,17 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
                         dynamic value;
                         if (wf.TypeSchema.Type == AvroType.Array)
                         {
-                            value = Resolve(wf.TypeSchema, rf.TypeSchema, dec, typeof(List<object>)) ?? wf.DefaultValue;
+                            value = Resolve(wf.TypeSchema, rf.TypeSchema, reader, typeof(List<object>)) ?? wf.DefaultValue;
                         }
                         else
                         {
-                            value = Resolve(wf.TypeSchema, rf.TypeSchema, dec, typeof(object)) ?? wf.DefaultValue;
+                            value = Resolve(wf.TypeSchema, rf.TypeSchema, reader, typeof(object)) ?? wf.DefaultValue;
                         }
 
                         result.Add(name, value);
                     }
                     else
-                        _skipper.Skip(wf.TypeSchema, dec);
+                        _skipper.Skip(wf.TypeSchema, reader);
                 }
                 return result;
             }
@@ -149,7 +165,7 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
 
             if (t.IsEnum)
             {
-                return Enum.Parse(t, (string)defaultValue);
+                return EnumParser.Parse(t, (string)defaultValue);
             }
 
             //TODO: Map and Record default values are represented as Dictionary<string,object>
@@ -161,15 +177,17 @@ namespace SolTechnology.Avro.AvroObjectServices.Read
 
         private class ReadStep
         {
-            public RecordFieldSchema WriteFieldSchema { get; set; }
-            public RecordFieldSchema ReadFieldSchema { get; set; }
-            public Member MemberInfo { get; set; }
+            internal RecordFieldSchema WriteFieldSchema { get; set; }
+            internal RecordFieldSchema ReadFieldSchema { get; set; }
+            internal Member MemberInfo { get; set; }
+            internal bool ShouldSkip { get; set; }
 
-            public ReadStep(RecordFieldSchema writeFieldSchema, RecordFieldSchema readFieldSchema, Member memberInfo)
+            public ReadStep(RecordFieldSchema writeFieldSchema, RecordFieldSchema readFieldSchema, Member memberInfo, bool shouldSkip = false)
             {
                 WriteFieldSchema = writeFieldSchema;
                 ReadFieldSchema = readFieldSchema;
                 MemberInfo = memberInfo;
+                ShouldSkip = shouldSkip;
             }
         }
     }
